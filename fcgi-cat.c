@@ -16,6 +16,7 @@
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <errno.h>
 #include <getopt.h>
 #include <sys/types.h>
@@ -23,12 +24,16 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
+#include <sys/sendfile.h>
 
 /* HTTP ERROR CODES */
-#define HTTP_BAD_REQUEST		400
-#define HTTP_FORBIDDEN			403
-#define HTTP_NOT_FOUND			404
-#define HTTP_INTERNAL_ERROR		500
+#define HTTP_OK					"Status: 200 OK\n"
+#define HTTP_BAD_REQUEST		"Status: 400 Bad Request\n"
+#define HTTP_FORBIDDEN			"Status: 403 Forbidden\n"
+#define HTTP_NOT_FOUND			"Status: 404 Not Found\n"
+#define HTTP_INTERNAL_ERROR		"Status: 500 Server Internal Error\n"
+
+#define FCGICAT_BUFSIZE			(4*1024*1024)
 
 int main(int argc, char *argv[])
 {
@@ -42,16 +47,16 @@ int main(int argc, char *argv[])
 		struct stat		stbuf;
 		struct tm	   *tm;
 		int				fdesc;
-		int				sockfd;
-		ssize_t			sent;
-		ssize_t			total;
 		int				status = 0;
+		ssize_t			total;
+		ssize_t			length;
+		char			buffer[FCGICAT_BUFSIZE];
 
 		if (!filename)
 		{
+			FCGI_puts(HTTP_BAD_REQUEST);
 			FCGI_fprintf(FCGI_stderr,
 						 "fcgi-cat: no filename given with SCRIPT_FILENAME\n");
-			status = HTTP_BAD_REQUEST;
 			goto skip;
 		}
 
@@ -59,29 +64,29 @@ int main(int argc, char *argv[])
 		if (fdesc < 0)
 		{
 			FCGI_fprintf(FCGI_stderr,
-						 "fcgi-cat: could not open file: \"%s\"\n", filename);
+						 "fcgi-cat: failed to open file \"%s\" (%s)",
+						 filename, strerror(errno));
 			if (errno == EACCES || errno == EPERM)
-				status = HTTP_FORBIDDEN;
+				FCGI_puts(HTTP_FORBIDDEN);
 			else if (errno == ENOENT)
-				status = HTTP_NOT_FOUND;
+				FCGI_puts(HTTP_NOT_FOUND);
 			else
-				status = HTTP_INTERNAL_ERROR;
+				FCGI_puts(HTTP_INTERNAL_ERROR);
 			goto skip;
 		}
 
 		if (fstat(fdesc, &stbuf) != 0)
 		{
 			FCGI_fprintf(FCGI_stderr,
-						 "fcgi-cat: could not stat file: \"%s\"\n", filename);
+						 "fcgi-cat: failed to stat file \"%s\" (%s)",
+						 filename, strerror(errno));
 			if (errno == EACCES || errno == EPERM)
-				status = HTTP_FORBIDDEN;
+				FCGI_puts(HTTP_FORBIDDEN);
 			else
-				status = HTTP_INTERNAL_ERROR;
+				FCGI_puts(HTTP_INTERNAL_ERROR);
 			close(fdesc);
 			goto skip;
 		}
-
-		sockfd = FCGI_fileno(FCGI_stdout);
 
 		/*
 		 * Generate HTTP Headers
@@ -92,18 +97,25 @@ int main(int argc, char *argv[])
 					tm->tm_year + 1900, tm->tm_hour, tm->tm_min, tm->tm_sec);
 		FCGI_printf("Content-Length: %" PRIu64 "\n",
 					(uint64_t)stbuf.st_size);
-		
 		FCGI_putchar('\n');
 
-		for (total=0; total < stbuf.st_size; total += sent)
+		for (total=0; total < stbuf.st_size; total += length)
 		{
-			sent = sendfile(sockfd, fdesc, NULL, stbuf.st_size);
-			if (sent < 1)
+			length = read(fdesc, buffer, sizeof(buffer));
+			if (length < 0)
 			{
 				FCGI_fprintf(FCGI_stderr,
-							 "fcgi-cat: error during sendfile: \"%s\" (%m)\n",
-							 filename);
-				status = HTTP_INTERNAL_ERROR;
+							 "fcgi-cat: failed on read from \"%s\" (%s)",
+							 filename, strerror(errno));
+				status = 1;
+				break;
+			}
+			if (FCGI_fwrite(buffer, 1, length, FCGI_stdout) != length)
+			{
+				FCGI_fprintf(FCGI_stderr,
+							 "fcgi-cat: failed on write to IPC (%s)",
+							 strerror(errno));
+				status = 1;
 				break;
 			}
 		}
