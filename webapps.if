@@ -1,0 +1,44 @@
+##
+## Interface for common web application
+##
+interface(`webapp_base_templace',`
+	gen_require(`
+		role	system_r;
+		type	bin_t;
+		type	httpd_t;
+	')
+	type $1_webapp_tmp_t;
+	files_tmp_file($1_webapp_tmp_t)
+
+	domain_type($1_webapp_t)
+	role system_r types $1_webapp_t;
+
+	# domain transition using runcon
+	spec_domtrans_pattern(httpd_t, bin_t, $1_webapp_t)
+	allow httpd_t bin_t : file entrypoint;
+
+	allow $1_webapp_t self:process ~{ ptrace setcurrent setexec setfscreate setrlimit execmem execstack execheap };
+	allow $1_webapp_t self:fd use;
+	allow $1_webapp_t self:fifo_file rw_fifo_file_perms;
+	allow $1_webapp_t self:sock_file read_sock_file_perms;
+	allow $1_webapp_t self:unix_dgram_socket create_socket_perms;
+	allow $1_webapp_t self:unix_stream_socket create_stream_socket_perms;
+	allow $1_webapp_t self:unix_dgram_socket sendto;
+	allow $1_webapp_t self:unix_stream_socket connectto;
+	allow $1_webapp_t self:shm create_shm_perms;
+	allow $1_webapp_t self:sem create_sem_perms;
+	allow $1_webapp_t self:msgq create_msgq_perms;
+	allow $1_webapp_t self:msg { send receive };
+
+	manage_dirs_pattern($1_webapp_t, $1_webapp_tmp_t, $1_webapp_tmp_t)
+	manage_files_pattern($1_webapp_t, $1_webapp_tmp_t, $1_webapp_tmp_t)
+	files_tmp_filetrans($1_webapp_t, $1_webapp_tmp_t, { file dir })
+
+	fs_search_auto_mountpoints($1_webapp_t)
+
+	auth_use_nsswitch($1_webapp_t)
+
+	libs_exec_lib_files($1_webapp_t)
+
+	userdom_use_unpriv_users_fds($1_webapp_t)
+')

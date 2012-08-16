@@ -1,0 +1,42 @@
+policy_module(webapps, 1.0)
+
+gen_require(`
+	type init_t;
+	type initrc_t;
+	type httpd_t;
+	type httpd_exec_t;
+')
+
+##
+## HTTPD Local policy
+##
+allow httpd_t self : process { setexec };
+
+selinux_validate_context(httpd_t)
+
+ifdef(`enable_mcs',`
+	range_transition initrc_t httpd_exec_t:process s0 - mcs_systemhigh;
+	range_transition init_t httpd_exec_t:process s0 - mcs_systemhigh;
+')
+
+##
+## Policy for Authenticated WebApps
+##
+type user_webapp_t;
+webapp_base_templace(user)
+
+optional_policy(`
+	postgresql_stream_connect(user_webapp_t)
+	postgresql_role(system_r, user_webapp_t)
+')
+
+##
+## Policy for Anonymous WebApps
+##
+type anon_webapp_t;
+webapp_base_templace(anon)
+
+optional_policy(`
+	postgresql_stream_connect(anon_webapp_t)
+	postgresql_unpriv_client(anon_webapp_t)
+')
