@@ -104,3 +104,18 @@ pgsql_minmax <- function(relname, att_pk, att_val, nloops)
     dbDisconnect(conn)
   })
 }
+
+#
+# pgsql_minmax_bycpu - returns id and distance of the items
+#       (*) It runs all the calculation stuff on the CPU side
+#           once data is exported from the remote PostgreSQL
+# arguments:
+# relname - name of the target table (string)
+# att_pk  - name of the primary key column (string)
+# att_val - vector of the property columns (string[])
+# nloops  - number of iteration (integer)
+#
+pgsql_minmax_bycpu <- function(relname, att_pk, att_val, nloops)
+{
+  stop("under construction");
+}
