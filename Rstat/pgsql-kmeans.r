@@ -39,73 +39,106 @@ vatts_small <- c("c1","c2","c3","c4","c5","c6","c7","c8","c9","c10")
 # threshold - maximum distance to continue k-means repeat (float, default: 0.0)
 #
 pgsql_kmeans_tryblock <- function(conn, relname, att_pk, att_val,
-                                  n_clusters, threshold=0.0)
+                                  n_clusters, threshold)
 {
+  # Turn on/off PG-Strom
+  #dbGetQuery(conn, "SET pg_strom.enabled = off")
+
   #
   # Init: construction of pg_temp.cluster_map based on random
   #
-  sql1 <- "SELECT " || att_pk || ", " ||
+  sql1 <- "SELECT " || att_pk || " did, " ||
               "(random() * " || n_clusters || ")::int + 1 cid " ||
             "INTO pg_temp.cluster_map " ||
             "FROM " || relname
-  print(sql1)
+  print("SQL1: " || sql1, quote=FALSE)
 
   #
-  # Init: construction of pg_temp.centroid according to the cluster_map
+  # Repeat: construction of pg_temp.centroid according to the cluster_map
   #
+  sql2a <- "DROP TABLE IF EXISTS pg_temp.centroid"
   sql2 <- "SELECT cid"
   for (att in att_val)
   {
     sql2 <- sql2 || ", avg(" || att || ") " || att
   }
   sql2 <- sql2 || " INTO pg_temp.centroid " ||
-                  " FROM pg_temp.cluster_map c, " || relname || " r " ||
-                  "WHERE c." || att_pk || " = r." || att_pk ||
-                  " GROUP BY cid"
-  print(sql2)
+                  "FROM pg_temp.cluster_map c, " || relname || " r " ||
+                  "WHERE c.did = r." || att_pk || " GROUP BY cid"
+  print("SQL2: " || sql2, quote=FALSE)
 
   #
   # Repeat: calculation of the distance between each item and centroid,
   #         then item shall belong to the closest cluster on the next
   #
-  sql3 <- "SELECT " || att_pk || ", cid INTO pg_temp.cluster_map_new " ||
-            "FROM (SELECT row_number() OVER w rank, " ||
-                         "r." || att_pk || ", c.cid, " ||
-                         "sqrt("
+  sql3 <- "SELECT did, cid INTO pg_temp.cluster_map_new " ||
+            "FROM (SELECT row_number() OVER w rank, did, cid " ||
+                    "FROM (SELECT r." || att_pk || " did, c.cid, sqrt("
   is_first <- 1
-  for (att in att_val) 
+  for (att in att_val)
   {
     sql3 <- sql3 || ifelse(is_first, "", " + ") ||
             "(r." || att || " - c." || att || ")^2"
     is_first <- 0
   }
-  sql3 <- sql3 || ") dist FROM " || relname || " r, centroid c) new_dist " ||
-          "WINDOW w AS (PARTITION BY " || att_pk ||" ORDER BY dist)) foo " ||
-          "WHERE rank = 1"
-  print(sql3)
+  sql3 <- sql3 || ") dist " ||
+          "FROM " || relname || " r, pg_temp.centroid c) new_dist " ||
+        "WINDOW w AS (PARTITION BY did ORDER BY dist)) new_dist_rank " ||
+        "WHERE rank = 1"
+  print("SQL3: " || sql3, quote=FALSE)
 
   #
   # Repeat: check differences between cluster_map and cluster_map_new
   #
-  sql4 <- "SELECT count(*) FROM (" ||
-          "SELECT * FROM pg_temp.cluster_map " ||
-          "EXCEPT ALL " ||
-          "SELECT * FROM pg_temp.cluster_map_new" ||
-          ") diff"
-  print(sql4)
+  sql4 <- "SELECT count(*) count " ||
+            "FROM pg_temp.cluster_map o, pg_temp.cluster_map_new n " ||
+           "WHERE o.did = n.did AND o.cid != n.cid"
+  print("SQL4: " || sql4, quote=FALSE)
 
   #
-  # Repeat: if SQL4 has any result, cluster_map_new is renamed to
+  # Repeat: rename pg_temp.cluster_map_new to cluster_map
   #
-  sql5a <- "DROP TABLE pg_temp.cluster_map"
+  sql5a <- "DROP TABLE IF EXISTS pg_temp.cluster_map"
   sql5b <- "ALTER TABLE pg_temp.cluster_map_new RENAME TO cluster_map"
   sql5c <- "VACUUM ANALYZE pg_temp.cluster_map"
 
-  
+  #
+  # Final: Dump the cluster_map
+  #
+  sql6 <- "SELECT c.cid, r.* " ||
+            "FROM pg_temp.cluster_map c, " || relname || " r " ||
+           "WHERE c.did = r." || att_pk;
 
+  #-- execution and iteration --
+  dbGetQuery(conn, sql1);
+
+  count <- threshold + 1
+  loop <- 1
+  while (count > threshold)
+  {
+    # construction of pg_temp.centroid
+    dbGetQuery(conn, sql2a)
+    dbGetQuery(conn, sql2)
+    # construction of pg_temp.cluster_map_new
+    dbGetQuery(conn, sql3)
+    # count difference
+    res = dbGetQuery(conn, sql4)
+
+    count = res[[1, "count"]]
+    print(as.character(loop) || "th trial => count = " || as.character(count))
+    loop <- loop + 1
+
+    # preparation of the next execution
+    dbGetQuery(conn, sql5a)
+    dbGetQuery(conn, sql5b)
+    dbGetQuery(conn, sql5c)
+  }
+  # Dump the latest pg_temp.cluster_map
+  return(dbGetQuery(conn, sql6))
 }
 
-pgsql_kmeans <- function(relname, att_pk, att_val, n_clusters, threshold=0.0)
+pgsql_kmeans <- function(relname, att_pk, att_val,
+                         n_clusters, threshold=1000)
 {
   # Open the database connection
   conn <- dbConnect(PostgreSQL(),
