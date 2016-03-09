@@ -57,35 +57,37 @@ pgsql_kmeans_tryblock <- function(conn, relname, att_pk, att_val,
   # Repeat: construction of pg_temp.centroid according to the cluster_map
   #
   sql2a <- "DROP TABLE IF EXISTS pg_temp.centroid"
-  sql2 <- "SELECT cid"
+  sql2b <- "SELECT cid"
   for (att in att_val)
   {
-    sql2 <- sql2 || ", avg(" || att || ") " || att
+    sql2b <- sql2b || ", avg(" || att || ") " || att
   }
-  sql2 <- sql2 || " INTO pg_temp.centroid " ||
+  sql2b <- sql2b || " INTO pg_temp.centroid " ||
                   "FROM pg_temp.cluster_map c, " || relname || " r " ||
                   "WHERE c.did = r." || att_pk || " GROUP BY cid"
-  print("SQL2: " || sql2, quote=FALSE)
+  sql2c <- "VACUUM ANALYZE pg_temp.centroid"
+  print("SQL2: " || sql2b, quote=FALSE)
 
   #
   # Repeat: calculation of the distance between each item and centroid,
   #         then item shall belong to the closest cluster on the next
   #
-  sql3 <- "SELECT did, cid INTO pg_temp.cluster_map_new " ||
-            "FROM (SELECT row_number() OVER w rank, did, cid " ||
-                    "FROM (SELECT r." || att_pk || " did, c.cid, sqrt("
+  sql3a <- "SELECT did, cid INTO pg_temp.cluster_map_new " ||
+             "FROM (SELECT row_number() OVER w rank, did, cid " ||
+                     "FROM (SELECT r." || att_pk || " did, c.cid, sqrt("
   is_first <- 1
   for (att in att_val)
   {
-    sql3 <- sql3 || ifelse(is_first, "", " + ") ||
+    sql3a <- sql3a || ifelse(is_first, "", " + ") ||
             "(r." || att || " - c." || att || ")^2"
     is_first <- 0
   }
-  sql3 <- sql3 || ") dist " ||
+  sql3a <- sql3a || ") dist " ||
           "FROM " || relname || " r, pg_temp.centroid c) new_dist " ||
         "WINDOW w AS (PARTITION BY did ORDER BY dist)) new_dist_rank " ||
         "WHERE rank = 1"
-  print("SQL3: " || sql3, quote=FALSE)
+  print("SQL3: " || sql3a, quote=FALSE)
+  sql3b <- "VACUUM ANALYZE pg_temp.cluster_map_new";
 
   #
   # Repeat: check differences between cluster_map and cluster_map_new
@@ -100,7 +102,7 @@ pgsql_kmeans_tryblock <- function(conn, relname, att_pk, att_val,
   #
   sql5a <- "DROP TABLE IF EXISTS pg_temp.cluster_map"
   sql5b <- "ALTER TABLE pg_temp.cluster_map_new RENAME TO cluster_map"
-  sql5c <- "VACUUM ANALYZE pg_temp.cluster_map"
+  print("SQL5: " || sql5, quote=FALSE)
 
   #
   # Final: Dump the cluster_map
@@ -118,9 +120,13 @@ pgsql_kmeans_tryblock <- function(conn, relname, att_pk, att_val,
   {
     # construction of pg_temp.centroid
     dbGetQuery(conn, sql2a)
-    dbGetQuery(conn, sql2)
+    dbGetQuery(conn, sql2b)
+    dbGetQuery(conn, sql2c)
+
     # construction of pg_temp.cluster_map_new
-    dbGetQuery(conn, sql3)
+    dbGetQuery(conn, sql3a)
+    dbGetQuery(conn, sql3b)
+
     # count difference
     res = dbGetQuery(conn, sql4)
 
@@ -131,7 +137,6 @@ pgsql_kmeans_tryblock <- function(conn, relname, att_pk, att_val,
     # preparation of the next execution
     dbGetQuery(conn, sql5a)
     dbGetQuery(conn, sql5b)
-    dbGetQuery(conn, sql5c)
   }
   # Dump the latest pg_temp.cluster_map
   return(dbGetQuery(conn, sql6))
