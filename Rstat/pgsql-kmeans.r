@@ -32,6 +32,142 @@ vatts_full <- c("c1","c2","c3","c4","c5","c6","c7","c8","c9","c10",
                 "c41","c42")
 vatts_small <- c("c1","c2","c3","c4","c5","c6","c7","c8","c9","c10")
 
+#
+# pgsql_kmeans_init_random
+#
+# It makes initial pg_temp.centroid according to the random distribution 
+# ------
+# arguments:
+# conn - PostgreSQL connection
+# relname - name of the target table (string)
+# att_pk  - name of the primary key column (string)
+# att_val - vector of the property columns (string[])
+# n_clusters - number of clusters (integer)
+#
+pgsql_kmeans_init_random <- function(conn, relname, att_pk, att_val, n_clustrs)
+{
+  #
+  # SQL1: construction of pg_temp.cluster_map based on random
+  #
+  sql1a <- "SELECT " || att_pk || " did, " ||
+                   " floor(random() * " || n_clusters ")::int + 1 cid " ||
+             "INTO pg_temp.cluster_map " ||
+             "FROM " || relname
+  sql1b <- "VACUUM ANALYZE pg_temp.cluster_map"
+  if (PgParam_PrintSQL)
+  {
+    print("Init SQL1: " || sql1a, quote=FALSE)
+  }
+  dbGetQuery(conn, sql1a);
+  dbGetQuery(conn, sql1b);
+
+  #
+  # SQL2: construction of pg_temp.centroid
+  #
+  sql2a <- "DROP TABLE IF EXISTS pg_temp.centroid"
+  sql2b <- "SELECT cid"
+  for (att in att_val)
+  {
+    sql2b <- sql2b || ", avg(" || att || ") " || att
+  }
+  sql2b <- sql2b || " INTO pg_temp.centroid " ||
+                  "FROM pg_temp.cluster_map c, " || relname || " r " ||
+                  "WHERE c.did = r." || att_pk || " GROUP BY cid"
+  sql2c <- "VACUUM ANALYZE pg_temp.centroid"
+  if (PgParam_PrintSQL)
+  {
+    print("SQL2: " || sql2b, quote=FALSE)
+  }
+  dbGetQuery(conn, sql2a);
+  dbGetQuery(conn, sql2b);
+  dbGetQuery(conn, sql2c);
+}
+
+#
+# pgsql_kmeans_init_random
+#
+# It makes initial pg_temp.centroid according to the k-means++ algorithm
+# ------
+# arguments:
+# conn - PostgreSQL connection
+# relname - name of the target table (string)
+# att_pk  - name of the primary key column (string)
+# att_val - vector of the property columns (string[])
+# n_clusters - number of clusters (integer)
+#
+pgsql_kmeans_init_plus <- function(conn, relname, att_pk, att_val, n_clustrs)
+{
+  #
+  # SQL1 : choose an initial centroid item based on random manner
+  #
+  sql1a <- "DROP TABLE IF EXISTS pg_temp.centroid"
+  sql1b <- "SELECT 1 cid"
+  for (att in att_val)
+  {
+    sql1b <- sql1b || ", " || att
+  }
+  sql1b <- sql1b || " INTO pg_temp.centroid FROM " || relname ||
+                    " ORDER BY random() LIMIT 1"
+  sql1c <= "VACUUM ANALYZE pg_temp.centroid"
+  if (PgParam_PrintSQL)
+  {
+    print("SQL1: " || sql1b, quote=FALSE)
+  }
+
+  #
+  # SQL2 : compute dist^2 from the centroid for each items
+  #        (it is a part of SQL3)
+  sql2a <- "SELECT c.cid, r." || att_pk || " did, "
+  is_first <- true
+  for (att in att_val)
+  {
+    if (!is_first)
+    {
+      sql2a <- sql2a || " + "
+    }
+    sql2a <- sql2a || "(c." || att || " - r." || att || ")^2"
+    is_first <- false
+  }
+  sql2a <- " dist2 FROM pg_temp.centroid, " || relname || " r"
+
+  sql2b <- "SELECT row_number() OVER w rank, did, dist2" ||
+            " FROM (" || sql2a || ") dist2_all" ||
+          " WINDOW w AS (PARTITION BY did ORDER BY dist2)"
+
+  sql2c <- "SELECT did, dist2 FROM (" || sql2b ") dist2_rank" ||
+           " WHERE rank = 1 ORDER BY dist"
+  sql2d <- "WITH dist2_next AS (" ||
+           "SELECT row_number() OVER() rank, did, dist2" ||
+           " FROM (" || sql2c || ") dist2_final)"
+
+  # histgram by distance
+  sql3a <- "SELECT did, SUM(dist2) OVER (ORDER BY rank)" ||
+                  " / (SELECT SUM(dist2) FROM dist2_next) ratio" ||
+                  " FROM dist2_next"
+  sql3b <- "SELECT * FROM (" || sql3a || ") dist2_hist" ||
+           " WHERE ratio > (SELECT random())" ||
+           " LIMIT 1"
+  sql3c <- "SELECT (SELECT COUNT(*)+1 FROM pg_temp.centroid)"
+  for (att in att_val)
+  {
+    sql3c <- sql3c || ", r." || att
+  }
+  sql3c <- sql3c || " FROM (" || sql3b || ") dist2_pickup d, " ||
+                                             relname || " r" ||
+                   " WHERE r." || att_pk || " = d.did"
+  sql3d <- sql2d || "INSERT INTO pg_temp.centroid (" || sql3c || ")"
+
+  if (PgParam_PrintSQL)
+  {
+    print("SQL3: " || sql3d, quote=FALSE)
+  }
+
+}
+
+
+
+
+
 
 #
 # pgsql_kmeans - returns pair of id and cluster for each item
