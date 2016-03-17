@@ -50,7 +50,7 @@ pgsql_kmeans_init_random <- function(conn, relname, att_pk, att_val, n_clustrs)
   # SQL1: construction of pg_temp.cluster_map based on random
   #
   sql1a <- "SELECT " || att_pk || " did, " ||
-                   " floor(random() * " || n_clusters ")::int + 1 cid " ||
+                   " floor(random() * " || n_clusters || ")::int + 1 cid " ||
              "INTO pg_temp.cluster_map " ||
              "FROM " || relname
   sql1b <- "VACUUM ANALYZE pg_temp.cluster_map"
@@ -78,9 +78,9 @@ pgsql_kmeans_init_random <- function(conn, relname, att_pk, att_val, n_clustrs)
   {
     print("SQL2: " || sql2b, quote=FALSE)
   }
-  dbGetQuery(conn, sql2a);
-  dbGetQuery(conn, sql2b);
-  dbGetQuery(conn, sql2c);
+#  dbGetQuery(conn, sql2a);
+#  dbGetQuery(conn, sql2b);
+#  dbGetQuery(conn, sql2c);
 }
 
 #
@@ -108,7 +108,7 @@ pgsql_kmeans_init_plus <- function(conn, relname, att_pk, att_val, n_clustrs)
   }
   sql1b <- sql1b || " INTO pg_temp.centroid FROM " || relname ||
                     " ORDER BY random() LIMIT 1"
-  sql1c <= "VACUUM ANALYZE pg_temp.centroid"
+  sql1c <- "VACUUM ANALYZE pg_temp.centroid"
   if (PgParam_PrintSQL)
   {
     print("SQL1: " || sql1b, quote=FALSE)
@@ -118,7 +118,7 @@ pgsql_kmeans_init_plus <- function(conn, relname, att_pk, att_val, n_clustrs)
   # SQL2 : compute dist^2 from the centroid for each items
   #        (it is a part of SQL3)
   sql2a <- "SELECT c.cid, r." || att_pk || " did, "
-  is_first <- true
+  is_first <- TRUE
   for (att in att_val)
   {
     if (!is_first)
@@ -126,16 +126,16 @@ pgsql_kmeans_init_plus <- function(conn, relname, att_pk, att_val, n_clustrs)
       sql2a <- sql2a || " + "
     }
     sql2a <- sql2a || "(c." || att || " - r." || att || ")^2"
-    is_first <- false
+    is_first <- FALSE
   }
-  sql2a <- " dist2 FROM pg_temp.centroid, " || relname || " r"
+  sql2a <- sql2a || " dist2 FROM pg_temp.centroid c, " || relname || " r"
 
   sql2b <- "SELECT row_number() OVER w rank, did, dist2" ||
             " FROM (" || sql2a || ") dist2_all" ||
           " WINDOW w AS (PARTITION BY did ORDER BY dist2)"
 
-  sql2c <- "SELECT did, dist2 FROM (" || sql2b ") dist2_rank" ||
-           " WHERE rank = 1 ORDER BY dist"
+  sql2c <- "SELECT did, dist2 FROM (" || sql2b || ") dist2_rank" ||
+           " WHERE rank = 1 ORDER BY dist2"
   sql2d <- "WITH dist2_next AS (" ||
            "SELECT row_number() OVER() rank, did, dist2" ||
            " FROM (" || sql2c || ") dist2_final)"
@@ -152,8 +152,7 @@ pgsql_kmeans_init_plus <- function(conn, relname, att_pk, att_val, n_clustrs)
   {
     sql3c <- sql3c || ", r." || att
   }
-  sql3c <- sql3c || " FROM (" || sql3b || ") dist2_pickup d, " ||
-                                             relname || " r" ||
+  sql3c <- sql3c || " FROM (" || sql3b || ") d, " || relname || " r" ||
                    " WHERE r." || att_pk || " = d.did"
   sql3d <- sql2d || "INSERT INTO pg_temp.centroid (" || sql3c || ")"
 
@@ -161,7 +160,6 @@ pgsql_kmeans_init_plus <- function(conn, relname, att_pk, att_val, n_clustrs)
   {
     print("SQL3: " || sql3d, quote=FALSE)
   }
-
 }
 
 
