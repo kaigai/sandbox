@@ -75,6 +75,10 @@ pgsql_kmeans_init_random <- function(conn, relname, att_pk, att_val, n_clustrs)
   dbGetQuery(conn, sql1);
 
   sql2 <- "VACUUM ANALYZE pg_temp.centroid"
+  if (PgParam_PrintSQL)
+  {
+    print("Init SQL2: " || sql2, quote=FALSE)
+  }
   dbGetQuery(conn, sql2);
 
   elapsed_sec = as.double(difftime(Sys.time(), tv1, units="secs"))
@@ -193,7 +197,7 @@ pgsql_kmeans_init_plus <- function(conn, relname, att_pk, att_val, n_clustrs)
 
   if (PgParam_PrintSQL)
   {
-    print("SQL2: " || sql2a, quote=FALSE)
+    print("Init SQL2: " || sql2a, quote=FALSE)
   }
 
   for (loop in c(1:n_clusters))
@@ -258,6 +262,11 @@ pgsql_kmeans_main <- function(conn, relname, att_pk, att_val,
           "WHERE rank = 1"
   sql1b <- "VACUUM ANALYZE pg_temp.cluster_map_new"
 
+  if (PgParam_PrintSQL)
+  {
+    print("main SQL1: " || sql1a, quote=FALSE)
+  }
+
   #
   # SQL2: update pg_temp.centroid according to the "cluster_map_new"
   #
@@ -269,16 +278,22 @@ pgsql_kmeans_main <- function(conn, relname, att_pk, att_val,
   #  WHERE cm.did = r.ATT_PK
   #  GROUP BY cm.cid
   #
-  sql2 <- "DROP TABLE IF EXISTS pg_temp.centroid; \n"
-  sql2 <- sql2 || "SELECT cm.cid"
+  sql2a <- "DROP TABLE IF EXISTS pg_temp.centroid"
+  sql2b <- "SELECT cm.cid"
   for (att in att_val)
   {
-    sql2 <- sql2 || ", AVG(r." || att || ") " || att
+    sql2b <- sql2b || ", AVG(r." || att || ") " || att
   }
-  sql2 <- sql2 || " FROM pg_temp.centroid c, " || relname || " r" ||
-                  " WHERE cm.did = r." || att_pk ||
-                  " GROUP BY cm.cid; \n"
-  sql2 <- sql2 || "VACUUM ANALYZE pg_temp.centroid"
+  sql2b <- sql2b || " INTO pg_temp.centroid" ||
+                    " FROM pg_temp.cluster_map_new cm, " || relname || " r" ||
+                   " WHERE cm.did = r." || att_pk ||
+                   " GROUP BY cm.cid"
+  sql2c <- "VACUUM ANALYZE pg_temp.centroid"
+
+  if (PgParam_PrintSQL)
+  {
+    print("main SQL2: " || sql2b, quote=FALSE)
+  }
 
   #
   # SQL3: rename cluster_map_new to cluster_map
@@ -288,8 +303,13 @@ pgsql_kmeans_main <- function(conn, relname, att_pk, att_val,
   # DROP TABLE IF EXISTS pg_temp.cluster_map
   # ALTER TABLE pg_temp.cluster_map_new RENAME TO cluster_map
   #
-  sql3 <- "DROP TABLE IF EXISTS pg_temp.cluster_map;\n"
-  sql3 <- "ALTER TABLE pg_temp.cluster_map_new RENAME TO cluster_map"
+  sql3a <- "DROP TABLE IF EXISTS pg_temp.cluster_map;\n"
+  sql3b <- "ALTER TABLE pg_temp.cluster_map_new RENAME TO cluster_map"
+
+  if (PgParam_PrintSQL)
+  {
+    print("main SQL3: " || sql3a || " + " || sql3b, quote=FALSE)
+  }
 
   #
   # SQL4: count difference between cluster_map and cluster_map_new
@@ -304,6 +324,11 @@ pgsql_kmeans_main <- function(conn, relname, att_pk, att_val,
           "  FROM pg_temp.cluster_map o, pg_temp.cluster_map_new n" ||
 	  " WHERE o.did = n.did AND o.cid != n.cid"
 
+  if (PgParam_PrintSQL)
+  {
+    print("main SQL4: " || sql4, quote=FALSE)
+  }
+
   #
   # SQL5: dump the cluster_map + RELNAME
   #
@@ -317,6 +342,11 @@ pgsql_kmeans_main <- function(conn, relname, att_pk, att_val,
             "FROM pg_temp.cluster_map_new c, " || relname || " r " ||
            "WHERE c.did = r." || att_pk;
 
+  if (PgParam_PrintSQL)
+  {
+    print("main SQL5: " || sql5, quote=FALSE)
+  }
+
   #
   # RUN Above Queries
   # -----------------
@@ -326,8 +356,11 @@ pgsql_kmeans_main <- function(conn, relname, att_pk, att_val,
   # init: make pg_temp.cluster_map_new
   dbGetQuery(conn, sql1a)
   dbGetQuery(conn, sql1b)
+
   # init: make pg_temp.centroid based on the pg_temp.cluster_map_new
-  dbGetQuery(conn, sql2)
+  dbGetQuery(conn, sql2a)
+  dbGetQuery(conn, sql2b)
+  dbGetQuery(conn, sql2c)
 
   elapsed_sec = as.double(difftime(Sys.time(), tv2, units="secs"))
   print(sprintf("k-means %dth: %.3f sec", loop, elapsed_sec, quote=FALSE))
@@ -337,25 +370,31 @@ pgsql_kmeans_main <- function(conn, relname, att_pk, att_val,
   {
     tv1 <- tv2
     # loop: rename cluster_map_new -> cluster_map
-    dbGetQuery(conn, sql3)
+    dbGetQuery(conn, sql3a)
+    dbGetQuery(conn, sql3b)
+
     # loop: make pg_temp.cluster_map_new
     dbGetQuery(conn, sql1a)
     dbGetQuery(conn, sql1b)
 
+    # compare cluster_map with cluster_map_new and count differences
+    res = dbGetQuery(conn, sql4)
+    count = res[[1, "count"]]
+
     tv2 <- Sys.time()
     elapsed_sec = as.double(difftime(tv2, tv1, units="secs"))
-    print(sprintf("k-means %dth: %.3f sec", loop, elapsed_sec, quote=FALSE))
+    print(sprintf("k-means %dth: %.3f sec, count=%d",
+                  loop, elapsed_sec, count, quote=FALSE))
 
-    if (threshold > 0)
+    if (threshold > 0 && count <= threshold)
     {
-      # loop: compare cluster_map with cluster_map_new and count differences
-      res = dbGetQuery(conn, sql4)
-      count = res[[1, "count"]]
-
-      if (count <= threshold) {break}
+      break;
     }
+
     # loop: make pg_temp.centroid based on cluster_map_new
-    dbGetQuery(conn, sql2)
+    dbGetQuery(conn, sql2a)
+    dbGetQuery(conn, sql2b)
+    dbGetQuery(conn, sql2c)
 
     loop <- loop + 1
   }
@@ -368,9 +407,10 @@ pgsql_kmeans_main <- function(conn, relname, att_pk, att_val,
 }
 
 #
-# pgsql_kmeans2
+# pgsql_kmeans_template
 #
 # arguments:
+# func    - function to make initial pg_temp.centroid
 # relname - name of the target table (string)
 # att_pk  - name of the primary key column (string)
 # att_val - vector of the property columns (string[])
@@ -378,8 +418,9 @@ pgsql_kmeans_main <- function(conn, relname, att_pk, att_val,
 # max_loops - max number of k-means iteration (integer, default: 20)
 # threshold - number of differences to break iteration (integer, default: 0)
 #
-pgsql_kmeans2 <- function(relname, att_pk, att_val, n_clusters,
-                          max_loops=20, threshold=0)
+pgsql_kmeans_template <- function(func,
+                                  relname, att_pk, att_val, n_clusters,
+                                  max_loops, threshold)
 {
   tv1 <- Sys.time()
   # Open the database connection
@@ -402,7 +443,7 @@ pgsql_kmeans2 <- function(relname, att_pk, att_val, n_clusters,
   if (class(res) == "try-error")
   {
     dbDisconnect(conn)
-    return(Null)
+    return(NULL)
   }
   # iterate k-means steps
   res <- try(pgsql_kmeans_main(conn, relname, att_pk, att_val,
@@ -410,7 +451,7 @@ pgsql_kmeans2 <- function(relname, att_pk, att_val, n_clusters,
   dbDisconnect(conn)
   if (class(res) == "try-error")
   {
-    return(Null)
+    return(NULL)
   }
   elapsed_sec = as.double(difftime(Sys.time(), tv1, units="secs"))
   print(sprintf("k-means total: %.3f sec", elapsed_sec, quote=FALSE))
@@ -418,146 +459,46 @@ pgsql_kmeans2 <- function(relname, att_pk, att_val, n_clusters,
   return(res)
 }
 
-
-
-
-
-
-
 #
-# pgsql_kmeans - returns pair of id and cluster for each item
+# pgsql_kmeans(_plus)
 #
 # arguments:
 # relname - name of the target table (string)
 # att_pk  - name of the primary key column (string)
 # att_val - vector of the property columns (string[])
 # n_clusters - number of clusters (integer)
-# threshold - maximum distance to continue k-means repeat (float, default: 0.0)
+# max_loops - max number of k-means iteration (integer, default: 20)
+# threshold - number of differences to break iteration (integer, default: 0)
 #
-pgsql_kmeans_tryblock <- function(conn, relname, att_pk, att_val,
-                                  n_clusters, threshold)
+pgsql_kmeans <- function(relname, att_pk, att_val, n_clusters,
+                         max_loops = 10, threshold = 0)
 {
-  #
-  # Init: construction of pg_temp.cluster_map based on random
-  #
-  sql1 <- "SELECT " || att_pk || " did, " ||
-              "(random() * " || n_clusters || ")::int + 1 cid " ||
-            "INTO pg_temp.cluster_map " ||
-            "FROM " || relname
-  if (PgParam_PrintSQL)
-  {
-    print("SQL1: " || sql1, quote=FALSE)
-  }
-
-  #
-  # Repeat: construction of pg_temp.centroid according to the cluster_map
-  #
-  sql2a <- "DROP TABLE IF EXISTS pg_temp.centroid"
-  sql2b <- "SELECT cid"
-  for (att in att_val)
-  {
-    sql2b <- sql2b || ", avg(" || att || ") " || att
-  }
-  sql2b <- sql2b || " INTO pg_temp.centroid " ||
-                  "FROM pg_temp.cluster_map c, " || relname || " r " ||
-                  "WHERE c.did = r." || att_pk || " GROUP BY cid"
-  sql2c <- "VACUUM ANALYZE pg_temp.centroid"
-  if (PgParam_PrintSQL)
-  {
-    print("SQL2: " || sql2b, quote=FALSE)
-  }
-
-  #
-  # Repeat: calculation of the distance between each item and centroid,
-  #         then item shall belong to the closest cluster on the next
-  #
-  sql3a <- "SELECT did, cid INTO pg_temp.cluster_map_new " ||
-             "FROM (SELECT row_number() OVER w rank, did, cid " ||
-                     "FROM (SELECT r." || att_pk || " did, c.cid, sqrt("
-  is_first <- 1
-  for (att in att_val)
-  {
-    sql3a <- sql3a || ifelse(is_first, "", " + ") ||
-            "(r." || att || " - c." || att || ")^2"
-    is_first <- 0
-  }
-  sql3a <- sql3a || ") dist " ||
-          "FROM " || relname || " r, pg_temp.centroid c) new_dist " ||
-        "WINDOW w AS (PARTITION BY did ORDER BY dist)) new_dist_rank " ||
-        "WHERE rank = 1"
-  sql3b <- "VACUUM ANALYZE pg_temp.cluster_map_new";
-  if (PgParam_PrintSQL)
-  {
-    print("SQL3: " || sql3a, quote=FALSE)
-  }
-
-  #
-  # Repeat: check differences between cluster_map and cluster_map_new
-  #
-  sql4 <- "SELECT count(*) count " ||
-            "FROM pg_temp.cluster_map o, pg_temp.cluster_map_new n " ||
-           "WHERE o.did = n.did AND o.cid != n.cid"
-  if (PgParam_PrintSQL)
-  {
-    print("SQL4: " || sql4, quote=FALSE)
-  }
-
-  #
-  # Repeat: rename pg_temp.cluster_map_new to cluster_map
-  #
-  sql5a <- "DROP TABLE IF EXISTS pg_temp.cluster_map"
-  sql5b <- "ALTER TABLE pg_temp.cluster_map_new RENAME TO cluster_map"
-  if (PgParam_PrintSQL)
-  {
-    print("SQL5: " || sql5a, quote=FALSE)
-  }
-
-  #
-  # Final: Dump the cluster_map
-  #
-  sql6 <- "SELECT c.cid, r.* " ||
-            "FROM pg_temp.cluster_map c, " || relname || " r " ||
-           "WHERE c.did = r." || att_pk;
-
-  #-- execution and iteration --
-  dbGetQuery(conn, sql1);
-
-  count <- threshold + 1
-  loop <- 1
-  tv1 <- Sys.time()
-  while (count > threshold)
-  {
-    # construction of pg_temp.centroid
-    dbGetQuery(conn, sql2a)
-    dbGetQuery(conn, sql2b)
-    dbGetQuery(conn, sql2c)
-
-    # construction of pg_temp.cluster_map_new
-    dbGetQuery(conn, sql3a)
-    dbGetQuery(conn, sql3b)
-
-    # count difference
-    res = dbGetQuery(conn, sql4)
-    tv2 <- Sys.time();
-    elapsed_sec = as.double(difftime(tv2, tv1, units="secs"))
-
-    count = res[[1, "count"]]
-    print(sprintf("%dth trial: count=%d, time=%.3fsec",
-                  loop, count, elapsed_sec), quote=FALSE)
-
-    # preparation of the next execution
-    dbGetQuery(conn, sql5a)
-    dbGetQuery(conn, sql5b)
-
-    tv1 <- tv2
-    loop <- loop + 1
-  }
-  # Dump the latest pg_temp.cluster_map
-  return(dbGetQuery(conn, sql6))
+  return(pgsql_kmeans_template(pgsql_kmeans_init_random,
+                               relname, att_pk, att_val, n_clusters,
+                               max_loops, threshold))
 }
 
-pgsql_kmeans <- function(relname, att_pk, att_val,
-                         n_clusters, threshold=1000)
+pgsql_kmeans <- function(relname, att_pk, att_val, n_clusters,
+                         max_loops = 10, threshold = 0)
+{
+  return(pgsql_kmeans_template(pgsql_kmeans_init_plus,
+                               relname, att_pk, att_val, n_clusters,
+                               max_loops, threshold))
+}
+
+#
+# pgsql_kmeans_bycpu - Get data from the PostgreSQL database them calculate
+#                      on the local machine
+#
+# arguments:
+# relname - name of the target table (string)
+# att_pk  - name of the primary key column (string)
+# att_val - vector of the property columns (string[])
+# n_clusters - number of clusters (integer)
+# max_loops - max number of k-means iteration (integer, default: 20)
+#
+pgsql_kmeans_bycpu <- function(relname, att_pk, att_val, n_clusters,
+                               max_loops = 20)
 {
   tv1 <- Sys.time()
   # Open the database connection
@@ -565,26 +506,25 @@ pgsql_kmeans <- function(relname, att_pk, att_val,
                     host=PgParam_hostname,
                     dbname=PgParam_dbname,
 		    port=PgParam_port)
-  # turn on/off PG-Strom
-  if (PgParam_PGStrom_Enabled == "on")
+  # Dump entire relation once
+  sql <- "SELECT " || att_pk
+  for (att in att_val)
   {
-    dbGetQuery(conn, "SET pg_strom.enabled=on")
+    sql <- sql || ", " || att
   }
-  else if (PgParam_PGStrom_Enabled == "off")
-  {
-    dbGetQuery(conn, "SET pg_strom.enabled=off")
-  }
-  res <- try(pgsql_kmeans_tryblock(conn,relname, att_pk, att_val,
-                                   n_clusters, threshold))
-  # clean up database session on error
-  dbDisconnect(conn)
+  sql <- sql || " FROM " || relname || " LIMIT 10000"
 
-  if (class(res) == "try-error")
-  {
-    return(Null)
-  }
-  elapsed_sec = as.double(difftime(Sys.time(), tv1, units="secs"))
-  print(sprintf("k-means total: %.3f sec", elapsed_sec, quote=FALSE))
+  rel <- dbGetQuery(conn, sql)
+
+  dbDisconnect(conn)
+  elapsed1_sec = as.double(difftime(Sys.time(), tv1, units="secs"))
+  print(sprintf("Download : %.3f sec", elapsed1_sec, quote=FALSE))
+
+  tv2 <- Sys.time()
+  res = kmeans(rel[-1], centers=n_clusters, iter.max=max_loops, nstart=53)
+  elapsed2_sec = as.double(difftime(Sys.time(), tv2, units="secs"))
+  print(sprintf("k-means by CPU : %.3f sec (total: %.3f sec)",
+        elapsed1_sec, elapsed1_sec + elapsed2_sec, quote=FALSE))
 
   return(res)
 }
