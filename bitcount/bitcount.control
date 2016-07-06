@@ -1,0 +1,5 @@
+# bitcount extension
+comment = 'Bitcount functions'
+default_version = '1.0'
+module_pathname = '$libdir/bitcount'
+relocatable = true
