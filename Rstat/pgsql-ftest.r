@@ -39,6 +39,7 @@ pgsql_ftest <- function(alpha)
                     host=PgParam_hostname,
                     dbname=PgParam_dbname,
                     port=PgParam_port)
+  res <- dbGetQuery(conn, "SET pg_strom.enabled=off")
   sql <- "SELECT model, count(*), variance(x+y+z) var
             FROM phones_accelerometer
            GROUP BY model
