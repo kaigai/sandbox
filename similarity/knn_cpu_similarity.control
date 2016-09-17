@@ -1,0 +1,5 @@
+# knn_cpu_similarity
+comment = 'CPU version of knn_gpu_similarity'
+default_version = '1.0'
+module_pathname = '$libdir/knn_cpu_similarity'
+relocatable = true
