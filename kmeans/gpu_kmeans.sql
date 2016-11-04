@@ -69,11 +69,12 @@ AS $$
 KERNEL_FUNCTION(void)
 setup_initial_cluster(MatrixType *D,
                       MatrixType *R,
-                      kern_arg_t k_value,
+                      MatrixType *C,
                       kern_arg_t r_seed)
 {
     cl_int     *d_data = (cl_int *)ARRAY_MATRIX_DATAPTR(D);
     cl_int	   *r_data = (cl_int *)ARRAY_MATRIX_DATAPTR(R);
+    cl_uint     k_value = ARRAY_MATRIX_HEIGHT(C);
     cl_uint     n = ARRAY_MATRIX_HEIGHT(R);
     cl_uint		a, b, c;
 
@@ -82,7 +83,7 @@ setup_initial_cluster(MatrixType *D,
         /* same logic of hash_uint32() */
 #define rot(x,k) (((x)<<(k)) | ((x)>>(32-(k))))
 
-        a = b = c = 0x9e3779b9 + (cl_uint) sizeof(uint32) + 3923095;
+        a = b = c = 0x9e3779b9 + (cl_uint) sizeof(cl_uint) + 3923095;
         a += (cl_uint)r_seed + get_global_id();
         /* final(a,b,c) */
         c ^= b; c -= rot(b,14);
@@ -114,17 +115,20 @@ clear_centroid(MatrixType *C)
 KERNEL_FUNCTION_MAXTHREADS(void)
 update_centroid(MatrixType *D,
                 MatrixType *R,
-                MatrixType *C,
-                kern_arg_t k_value)
+                MatrixType *C)
 {
     cl_float   *d_values = (cl_float *)ARRAY_MATRIX_DATAPTR(D);
     cl_int	   *r_values = (cl_int *)ARRAY_MATRIX_DATAPTR(R);
     cl_float   *c_values = (cl_float *)ARRAY_MATRIX_DATAPTR(C);
     cl_uint     nitems = ARRAY_MATRIX_HEIGHT(D);
     cl_uint     width = ARRAY_MATRIX_WIDTH(D);
+    cl_uint		k_value = ARRAY_MATRIX_HEIGHT(C);
     cl_float   *l_cent = SHARED_WORKMEM(cl_float);
     cl_uint     index;
     cl_int		i, j;
+
+    assert(nitems == ARRAY_MATRIX_HEIGHT(R));
+    assert(width == ARRAY_MATRIX_WIDTH(C));
 
     /* init shared memory */
     for (index = get_local_id();
@@ -148,7 +152,7 @@ update_centroid(MatrixType *D,
             atomicAdd(&l_cent[j * k_value + i],
                       d_values[j * nitems + index]);
     }
-    __sync_threads();
+    __syncthreads();
 
     /* write back to the global C-matrix */
     for (index = get_local_id();
@@ -179,78 +183,114 @@ update_centroid_final(MatrixType *C)
 KERNEL_FUNCTION(void)
 kmeans_update_cluster(MatrixType *D,
                       MatrixType *R,
-                      MatrixType *C
-                      kern_arg_t k_value)
+                      MatrixType *C)
 {
     cl_float   *dist_map = SHARED_WORKMEM(cl_float);
+    cl_int	   *dist_idx = (cl_int *)(dist_map + get_local_size());
     cl_uint		nitems = ARRAY_MATRIX_HEIGHT(D);
     cl_uint		width = ARRAY_MATRIX_WIDTH(D);
     cl_uint		k_value = ARRAY_MATRIX_HEIGHT(C);
-    cl_uint		did;
-    cl_uint		cid;
-    cl_uint		i;
     cl_float   *d_values = (cl_float *)ARRAY_MATRIX_DATAPTR(D);
     cl_float   *c_values = (cl_float *)ARRAY_MATRIX_DATAPTR(C);
     cl_int	   *r_values = (cl_int *)ARRAY_MATRIX_DATAPTR(R);
+    cl_uint		part_sz = get_local_size() / k_value;
+    cl_uint		did;
+    cl_uint		cid;
+    cl_uint		i, j;
     cl_float	dist = 0.0;
 
     assert(width == ARRAY_MATRIX_WIDTH(C));
     assert(nitems == ARRAY_MATRIX_HEIGHT(R));
 
-    did = get_global_id() / k_value;	/* index of D */
-    cid = get_global_id() % k_value;	/* index of C */
+    /* index of D-matrix and C-matrix */
+    did = get_global_index() * part_sz + get_local_id() / k_value;
+    cid = get_local_id() % k_value;
 
     /* make distance from the target centroid */
-    for (i=1, d_values += nitems, c_values += k_value;
-         i < width;
-         i++, d_values += nitems, c_values += k_value)
+    if (get_local_id() < part_sz * k_value)
     {
-        cl_float	x = d_values[did] - c_values[cid];
+        for (i=1, d_values += nitems, c_values += k_value;
+             i < width;
+             i++, d_values += nitems, c_values += k_value)
+        {
+            cl_float	x = d_values[did] - c_values[cid];
+            dist += x * x;
+        }
+        dist_map[get_local_id()] = dist;
+        dist_idx[get_local_id()] = cid;
 
-        dist += x * x;
+//        if (did % 100 == 0)
+        //        printf("did=%u k=%u dist=%f\n", did, cid, dist);
     }
-    dist_map[get_local_id()] = dist;
-    __sync_threads();
-
+    else
+    {
+        cid = ~0U;	/* never match in the steps below */
+    }
+    __syncthreads();
+#if 0
     /* pick up the nearest one */
-    for (loop)
+    for (i=2; i/2 < k_value; i *= 2)
     {
-
-
-
-
+        if ((cid & (i-1)) == 0)
+        {
+            j = i / 2;		/* offset to buddy */
+            if (cid + j < k_value &&
+                dist_map[get_local_id()] > dist_map[get_local_id() + j])
+            {
+                dist_map[get_local_id()] = dist_map[get_local_id() + j];
+                dist_idx[get_local_id()] = dist_idx[get_local_id() + j];
+            }
+        }
+        __syncthreads();
     }
-
     /* write back to the R-matrix */
     if (cid == 0)
-        r_values[nitems + did] = cluster_index;
+        r_values[nitems + did] = dist_idx[get_local_id()];
+#else
+    if (cid == 0)
+    {
+        dist = dist_map[get_local_id()];
+        j = dist_idx[get_local_id()];
+        if (did % 100 == 0)
+            printf("did=%u cid=0 dist=%f\n", did, dist);
+        for (i=1; i < k_value; i++)
+        {
+            if (did % 100 == 0)
+                printf("did=%u cid=%d dist=%f\n",
+                       did, i, dist_map[get_local_id() + i]);
+            if (dist > dist_map[get_local_id() + i])
+            {
+                dist = dist_map[get_local_id() + i];
+                j = dist_idx[get_local_id() + i];
+            }
+        }
+        if (did % 100 == 0)
+            printf("did=%u cid=%u chosen\n", did, cid);
+        r_values[nitems + did] = j;
+    }
+#endif
 }
 
-#plcuda_prep
+#plcuda_begin
 MatrixType *D = (MatrixType *) arg1.value;
 MatrixType *C = (MatrixType *) workbuf;
 MatrixType *R = (MatrixType *) results;
-cl_uint     k = arg2.value;
 cl_uint     nitems = ARRAY_MATRIX_HEIGHT(D);
 cl_uint     width = ARRAY_MATRIX_WIDTH(D);
-
-INIT_ARRAY_MATRIX(C, PG_FLOAT4OID, sizeof(cl_float), k, width);
-INIT_ARRAY_MATRIX(R, PG_FLOAT4OID, sizeof(cl_float), nitems, 2);
-retval->isnull = false;
-retval->value  = (varlena *) R;
-
-#plcuda_main
-MatrixType *D = (MatrixType *) arg1.value;
-MatrixType *C = (MatrixType *) workbuf;
-MatrixType *R = (MatrixType *) results;
-cl_uint     nitems = ARRAY_MATRIX_HEIGHT(D);
-cl_uint     width = ARRAY_MATRIX_WIDTH(D) - 1;
 cl_int      k_value = arg2.value;
 cl_int      loop, nloops = arg3.value;
 cl_int      r_seed = arg4.value;
 cl_int      device;
 cl_int      sm_count;
 cudaError_t status;
+
+/*
+ * Setup C- and R-matrix
+ */
+INIT_ARRAY_MATRIX(C, PG_FLOAT4OID, sizeof(cl_float), k_value, width);
+INIT_ARRAY_MATRIX(R, PG_INT4OID, sizeof(cl_float), nitems, 2);
+retval->isnull = false;
+retval->value = (varlena *)R;
 
 /*
  * Get device/function attributes
@@ -272,7 +312,7 @@ if (status != cudaSuccess)
 status = pgstromLaunchDynamicKernel4((void *)setup_initial_cluster,
                                      (kern_arg_t)(D),
                                      (kern_arg_t)(R),
-                                     (kern_arg_t)(k_value),
+                                     (kern_arg_t)(C),
                                      (kern_arg_t)(r_seed),
                                      nitems, 0, 0);
 if (status != cudaSuccess)
@@ -295,14 +335,12 @@ for (loop=0; loop < nloops; loop++)
 
     n_threads = Min(nitems, sm_count * 1024);
     required = sizeof(cl_uint) * width * k_value;
-    status = pgstromLaunchDynamicKernelMaxThreads4((void *)update_centroid,
+    status = pgstromLaunchDynamicKernelMaxThreads3((void *)update_centroid,
                                                    (kern_arg_t)(D),
                                                    (kern_arg_t)(R),
                                                    (kern_arg_t)(C),
-                                                   (kern_arg_t)(k_value),
-                                                   n_threads,
-                                                   required,
-                                                   0);
+                                                   1, n_threads,
+                                                   required, 0);
     if (status != cudaSuccess)
         PLCUDA_RUNTIME_ERROR_RETURN(status);
 
@@ -316,7 +354,16 @@ for (loop=0; loop < nloops; loop++)
      * calculation of the distance from the current centroid, then picks
      * up the nearest one and update R-matrix
      */
-    status = pgstromLaunchDynamicKernelMaxThreads4();
+    status = pgstromLaunchDynamicKernelMaxThreads3((void *)
+                                                   kmeans_update_cluster,
+                                                   (kern_arg_t)(D),
+                                                   (kern_arg_t)(R),
+                                                   (kern_arg_t)(C),
+                                                   k_value,
+                                                   nitems,
+                                                   0,
+                                                   sizeof(cl_int) +
+                                                   sizeof(cl_float));
     if (status != cudaSuccess)
         PLCUDA_RUNTIME_ERROR_RETURN(status);
 }
