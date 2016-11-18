@@ -1,6 +1,7 @@
 #include "postgres.h"
 #include "catalog/pg_type.h"
 #include "fmgr.h"
+#include "miscadmin.h"
 #include "utils/array.h"
 
 Datum	knn_cpu_similarity(PG_FUNCTION_ARGS);
@@ -129,6 +130,8 @@ knn_cpu_similarity(PG_FUNCTION_ARGS)
 
 	for (i=0; i < d_nitems; i++)
 	{
+		CHECK_FOR_INTERRUPTS();
+
 		/* calculation of similarity for each Q items */
 		for (j=0; j < q_nitems; j++)
 		{
